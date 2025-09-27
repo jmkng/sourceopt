@@ -24,27 +24,27 @@ pub const Flag = struct {
 /// Source interface.
 /// Enables a `Parser` to find flag values.
 pub const Source = struct {
-    value_ctx: *anyopaque,
-    value_fn: *const fn (ctx: *anyopaque, key: []const u8) anyerror!?[]const u8,
+    value_data: *anyopaque,
+    value_fn: *const fn (data: *anyopaque, key: []const u8) anyerror!?[]const u8,
     name_fn: *const fn () []const u8,
     describe_fn: *const fn (err: anyerror) []const u8,
 
     pub fn value(self: *Source, key: []const u8) anyerror!?[]const u8 {
-        return try self.value_fn(self.value_ctx, key);
+        return try self.value_fn(self.value_data, key);
     }
 
     pub fn Builder(comptime Data: type, comptime Error: type) type {
         return struct {
             const Self = @This();
 
-            value_ctx: *Data,
-            value_fn: *const fn (ctx: *Data, key: []const u8) Error!?[]const u8,
+            value_data: *Data,
+            value_fn: *const fn (data: *Data, key: []const u8) Error!?[]const u8,
             name_fn: *const fn () []const u8,
             describe_fn: *const fn (err: Error) []const u8,
 
             pub fn source(self: *const Self) Source {
                 return .{
-                    .value_ctx = self.value_ctx,
+                    .value_data = self.value_data,
                     .value_fn = @ptrCast(self.value_fn),
                     .name_fn = self.name_fn,
                     .describe_fn = @ptrCast(self.describe_fn),
@@ -119,10 +119,10 @@ pub const Source = struct {
                         return "env";
                     }
                 }.name,
-                .value_ctx = self,
+                .value_data = self,
                 .value_fn = struct {
-                    fn value(ctx: *Env, key: []const u8) ValueErrorSet!?[]const u8 {
-                        const ptr: *Self = @ptrCast(@alignCast(ctx));
+                    fn value(data: *Env, key: []const u8) ValueErrorSet!?[]const u8 {
+                        const ptr: *Self = @ptrCast(@alignCast(data));
                         return try ptr.*.value(key);
                     }
                 }.value,
@@ -190,13 +190,13 @@ pub const Source = struct {
 /// Assuming valid input, it will set its boolean to the according state,
 /// or resort to its default toggle behavior.
 pub const Setter = struct {
-    set_ctx: *anyopaque,
-    set_fn: *const fn (ctx: *anyopaque, value: ?[]const u8) anyerror!void,
+    set_data: *anyopaque,
+    set_fn: *const fn (data: *anyopaque, value: ?[]const u8) anyerror!void,
     describe: *const fn (err: anyerror) []const u8,
     require_value: bool,
 
     pub fn set(self: *const Setter, value: ?[]const u8) anyerror!void {
-        try self.set_fn(self.set_ctx, value);
+        try self.set_fn(self.set_data, value);
     }
 
     /// Builder is an additional step between some concrete implementation
@@ -214,7 +214,7 @@ pub const Setter = struct {
             /// Return a `Setter` from the `Builder`.
             pub fn setter(self: *const Self) Setter {
                 return .{
-                    .set_ctx = self.set_data,
+                    .set_data = self.set_data,
                     .set_fn = @ptrCast(self.set_fn),
                     .describe = @ptrCast(self.describe),
                     .require_value = self.require_value,
@@ -407,9 +407,9 @@ pub const Setter = struct {
         return .{
             .set_data = ptr,
             .set_fn = struct {
-                fn set(ctx: *T, value: ?[]const u8) std.fmt.ParseIntError!void {
+                fn set(data: *T, value: ?[]const u8) std.fmt.ParseIntError!void {
                     std.debug.assert(value != null);
-                    const t: *T = @ptrCast(@alignCast(ctx));
+                    const t: *T = @ptrCast(@alignCast(data));
                     t.* = try std.fmt.parseUnsigned(T, value.?, 10);
                 }
             }.set,
@@ -658,11 +658,11 @@ pub const Parser = struct {
 /// Iterator interface.
 /// Used by `Parser` to iterate over arguments.
 pub const Iterator = struct {
-    next_fn: *const fn (ctx: *anyopaque) ?[]const u8,
-    ctx: *anyopaque,
+    next_data: *anyopaque,
+    next_fn: *const fn (data: *anyopaque) ?[]const u8,
 
     pub fn next(self: *Iterator) ?[]const u8 {
-        return self.next_fn(self.ctx);
+        return self.next_fn(self.next_data);
     }
 
     /// Process iterator.
@@ -689,12 +689,12 @@ pub const Iterator = struct {
         pub fn interface(self: *Process) Iterator {
             return Iterator{
                 .next_fn = &Process.next,
-                .ctx = &self.inner_iterator,
+                .next_data = &self.inner_iterator,
             };
         }
 
-        fn next(ctx: *anyopaque) ?[]const u8 {
-            const it: *InnerType = @ptrCast(@alignCast(ctx));
+        fn next(data: *anyopaque) ?[]const u8 {
+            const it: *InnerType = @ptrCast(@alignCast(data));
             return it.next();
         }
     };
@@ -708,12 +708,12 @@ pub const Iterator = struct {
         pub fn iterator(self: *Fixed) Iterator {
             return Iterator{
                 .next_fn = &Fixed.next,
-                .ctx = self,
+                .next_data = self,
             };
         }
 
-        fn next(ctx: *anyopaque) ?[]const u8 {
-            var self: *Fixed = @ptrCast(@alignCast(ctx));
+        fn next(data: *anyopaque) ?[]const u8 {
+            var self: *Fixed = @ptrCast(@alignCast(data));
             if (self.index >= self.items.len) return null;
             const arg = self.items[self.index];
             self.index += 1;
@@ -725,10 +725,10 @@ pub const Iterator = struct {
         var fixed = Fixed{ .items = &[2][]const u8{ "a", "b" } };
         var iterator = fixed.iterator();
 
-        const a = iterator.next_fn(iterator.ctx);
-        const b = iterator.next_fn(iterator.ctx);
-        const null1 = iterator.next_fn(iterator.ctx);
-        const null2 = iterator.next_fn(iterator.ctx);
+        const a = iterator.next_fn(iterator.next_data);
+        const b = iterator.next_fn(iterator.next_data);
+        const null1 = iterator.next_fn(iterator.next_data);
+        const null2 = iterator.next_fn(iterator.next_data);
 
         try std.testing.expectEqualSlices(u8, a.?, "a");
         try std.testing.expectEqualSlices(u8, b.?, "b");
@@ -744,7 +744,7 @@ pub const Iterator = struct {
                 return null;
             }
         }.next,
-        .ctx = &.{},
+        .next_data = &.{},
     };
 }; // Iterator
 
@@ -885,7 +885,7 @@ test "using sources" {
     const Builder = Source.Builder(Map, error{});
 
     var map_builder = Builder{
-        .value_ctx = &map,
+        .value_data = &map,
         .value_fn = struct {
             fn value(data: *Map, key: []const u8) error{}!?[]const u8 {
                 return data.get(key);
