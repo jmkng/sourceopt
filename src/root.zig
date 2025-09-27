@@ -214,7 +214,7 @@ pub const Setter = struct {
             /// Return a `Setter` from the `Builder`.
             pub fn setter(self: *const Self) Setter {
                 return .{
-                    .set_data = self.set_data,
+                    .set_data = @ptrCast(self.set_data),
                     .set_fn = @ptrCast(self.set_fn),
                     .describe = @ptrCast(self.describe),
                     .require_value = self.require_value,
@@ -223,49 +223,44 @@ pub const Setter = struct {
         };
     }
 
-    // Below are the built-in setters.
-    // They return `Builder(X)` directly, rather than some specific type,
-    // because they don't need to be stateful -- so it saves some typing.
-    //
-    // The situation is different up by the built-in `Source` types,
-    // they often need state,
-    // so they expose concrete types that you create,
-    // and they make use of an equivalent builder type internally when
-    // converted to a source.
-
     // ∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨ Built-in ∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨
     // ∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨
 
-    // Bytes setter.
-    // Assigns a value to the provided pointer with no modification.
-    //
-    // If an allocator is provided,
-    // the value will be duped before assignment to the slice.
-    // The caller owns that memory.
-    pub fn @"[]const u8"(
-        ptr: *[]const u8,
-        o: struct { alloc: ?Allocator = null },
-    ) !Builder(anyopaque, Allocator.Error) {
-        const Wrapper = struct {
+    /// Additional built-ins which allocate memory.
+    /// These require a bit more care, see the doc comments for details.
+    pub const Allocating = struct {
+        /// TODO
+        pub const Bytes = struct {
             alloc: Allocator,
             ptr: *[]const u8,
+            /// Tracks the previous allocation.
+            /// The setter expects this field to be initialized as null.
+            /// If you allocate a `Bytes` on the heap, be sure to set this field to null,
+            /// or a segfault may occur as the setter attempts to free it.
+            ///
+            /// Calling `Bytes.deinit` will free this slice,
+            /// if the setter ever made an allocation.
+            /// If the setter is called multiple times, it will free the previous allocation.
+            prev_alloc: ?[]const u8 = null,
+
+            pub fn deinit(self: *Bytes) void {
+                if (self.prev_alloc) |prev| self.alloc.free(prev);
+            }
         };
 
-        var builder: Builder(anyopaque, Allocator.Error) = undefined;
-        if (o.alloc) |alloc| {
-            const v = try alloc.create(Wrapper);
-            v.*.alloc = alloc;
-            v.*.ptr = ptr;
-
-            builder = .{
-                .set_data = v,
+        /// TODO
+        pub fn @"[]const u8"(bytes: *Bytes) Builder(Bytes, Allocator.Error) {
+            return .{
+                .set_data = bytes,
                 .set_fn = struct {
-                    fn set(data: *anyopaque, value: ?[]const u8) Allocator.Error!void {
+                    fn set(data: *Bytes, value: ?[]const u8) Allocator.Error!void {
                         std.debug.assert(value != null);
-
-                        const wrap: @TypeOf(v) = @ptrCast(@alignCast(data));
-                        defer wrap.alloc.destroy(wrap);
-                        wrap.ptr.* = try wrap.alloc.dupe(u8, value.?);
+                        const new_value = value.?;
+                        const duped = try data.alloc.dupe(u8, new_value);
+                        // Clean up old value.
+                        if (data.prev_alloc) |prev| data.alloc.free(prev);
+                        data.ptr.* = duped;
+                        data.prev_alloc = duped;
                     }
                 }.set,
                 .describe = struct {
@@ -277,77 +272,92 @@ pub const Setter = struct {
                 }.describe,
                 .require_value = true,
             };
-        } else {
-            builder = .{
-                .set_data = @ptrCast(ptr),
-                .set_fn = struct {
-                    fn set(data: *anyopaque, value: ?[]const u8) Allocator.Error!void {
-                        std.debug.assert(value != null);
-
-                        const _ptr: @TypeOf(ptr) = @ptrCast(@alignCast(data));
-                        _ptr.* = value.?;
-                    }
-                }.set,
-                .describe = struct {
-                    fn describe(_: Allocator.Error) []const u8 {
-                        // This error type is required due to the way this function
-                        // is using the builder,
-                        // but it won't ever error, this version doesn't use the allocator.
-                        unreachable;
-                    }
-                }.describe,
-                .require_value = true,
-            };
         }
 
-        return builder;
+        test "allocating []const u8" {
+            var name: []const u8 = "liquid";
+            try std.testing.expectEqualStrings("liquid", name);
+            try std.testing.expectEqual(6, name.len);
+
+            var bytes = Setter.Allocating.Bytes{
+                .alloc = std.testing.allocator,
+                .ptr = &name,
+            };
+            // Deinit will free the duped value, but only if the setter was called.
+            defer bytes.deinit();
+
+            // Calling deinit right here will be a no-op -- "name" is static memory,
+            // the setter was never called, so nothing was duped.
+            // It won't try to free static memory.
+
+            const setter1 = Setter.Allocating.@"[]const u8"(&bytes).setter();
+            try setter1.set("solid");
+            try std.testing.expectEqualStrings("solid", name);
+            try std.testing.expectEqual(5, name.len);
+
+            // Now deinit will run and actually free "name" because the setter knows
+            // that it was actually called, and so it duped memory.
+        }
+    };
+
+    /// Bytes setter.
+    /// Assigns a value with no modification.
+    ///
+    /// For an equivalent setter that dupes all values,
+    /// see `Allocating.@"[]const u8"`.
+    pub fn @"[]const u8"(ptr: *[]const u8) Builder([]const u8, error{}) {
+        return .{
+            .set_data = @ptrCast(ptr),
+            .set_fn = struct {
+                fn set(data: *[]const u8, value: ?[]const u8) error{}!void {
+                    std.debug.assert(value != null);
+                    data.* = value.?;
+                }
+            }.set,
+            .describe = struct {
+                fn describe(_: error{}) []const u8 {
+                    unreachable;
+                }
+            }.describe,
+            .require_value = true,
+        };
     }
 
     test @"[]const u8" {
         var a1: []const u8 = "";
-        const setter1 = try Setter.@"[]const u8"(&a1, .{});
-        try setter1.set_fn(setter1.set_data, "pear");
+        const setter1 = Setter.@"[]const u8"(&a1).setter();
+        try setter1.set("pear");
         try std.testing.expectEqualStrings("pear", a1);
         try std.testing.expectEqual(4, a1.len);
-
-        var a2: []const u8 = "";
-        const setter2 = try Setter.@"[]const u8"(&a2, .{ .alloc = std.testing.allocator });
-        try setter2.set_fn(setter2.set_data, "clementine");
-        // Told the setter to dupe by providing an allocator,
-        // so must dealloc.
-        defer std.testing.allocator.free(a2);
-        try std.testing.expectEqualStrings("clementine", a2);
-        try std.testing.expectEqual(10, a2.len);
     }
 
-    // Boolean setter.
-    // Converts a value to boolean.
-    // This setter works with or without a value,
-    // but if a value is provided, it must be either "true" or "false,
-    // and will set the boolean accordingly.
-    //
-    // When this setter is called with a null or empty value,
-    // it will toggle the boolean.
+    /// Boolean setter.
+    /// Converts a value to boolean.
+    /// This setter works with or without a value,
+    /// but if a value is provided, it must be either "true" or "false,
+    /// and will set the boolean accordingly.
+    ///
+    /// When this setter is called with a null or empty value,
+    /// it will toggle the boolean.
     pub fn @"bool"(ptr: *bool) Builder(bool, error{InvalidBoolean}) {
         return .{
             .set_data = ptr,
             .set_fn = struct {
                 fn set(data: *bool, value: ?[]const u8) error{InvalidBoolean}!void {
-                    const _ptr: @TypeOf(ptr) = @ptrCast(@alignCast(data));
                     if (value) |v| {
                         if (std.mem.eql(u8, v, "true")) {
-                            _ptr.* = true;
+                            data.* = true;
                             return;
                         } else if (std.mem.eql(u8, v, "false")) {
-                            _ptr.* = false;
+                            data.* = false;
                             return;
                         } else if (v.len == 0) {
-                            _ptr.* = !_ptr.*;
+                            data.* = !data.*;
                             return;
                         }
                         return error.InvalidBoolean;
                     }
-                    _ptr.* = !_ptr.*;
+                    data.* = !data.*;
                 }
             }.set,
             .describe = struct {
@@ -862,7 +872,6 @@ test "basic flags" {
     };
 
     try p.parse(fixed.iterator(), .{});
-
     try std.testing.expectEqual(true, help);
     try std.testing.expectEqual(true, verbose);
     try std.testing.expectEqual(9000, port);
