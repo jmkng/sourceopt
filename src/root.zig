@@ -642,10 +642,15 @@ pub const Parser = struct {
     /// The name must exactly match.
     fn getFlagEquals(flags: []Flag, name: []const u8) ?*Flag {
         for (flags) |*flag| {
-            if (std.mem.startsWith(u8, name, flag.long)) return flag;
-            if (flag.short) |short|
-                if (std.mem.startsWith(u8, &[1]u8{short}, name)) return flag;
+            if (std.mem.eql(u8, name, flag.long))
+                return flag;
+
+            if (flag.short) |short_char| {
+                if (name.len == 1 and name[0] == short_char)
+                    return flag;
+            }
         }
+
         return null;
     }
 
