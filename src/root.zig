@@ -955,7 +955,7 @@ test "using sources" {
     // No arguments are provided...
     try p.parse(Iterator.Empty, .{});
 
-    // But the values are still set, thanks for the map source!
+    // But the values are still set, thanks to the map source!
     try std.testing.expectEqual(9000, port);
     try std.testing.expectEqual(true, verbose);
 }
