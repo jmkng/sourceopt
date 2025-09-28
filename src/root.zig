@@ -33,26 +33,6 @@ pub const Source = struct {
         return try self.value_fn(self.value_data, key);
     }
 
-    pub fn Builder(comptime Data: type, comptime Error: type) type {
-        return struct {
-            const Self = @This();
-
-            value_data: *Data,
-            value_fn: *const fn (data: *Data, key: []const u8) Error!?[]const u8,
-            name_fn: *const fn () []const u8,
-            describe_fn: *const fn (err: Error) []const u8,
-
-            pub fn source(self: *const Self) Source {
-                return .{
-                    .value_data = self.value_data,
-                    .value_fn = @ptrCast(self.value_fn),
-                    .name_fn = self.name_fn,
-                    .describe_fn = @ptrCast(self.describe_fn),
-                };
-            }
-        };
-    }
-
     // ∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨ Built-in ∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨
     // ∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨
 
@@ -97,35 +77,25 @@ pub const Source = struct {
         }
 
         pub fn source(self: *Env) Source {
-            const Self = @TypeOf(self.*);
-            const Value = @TypeOf(Self.value);
-            const ValueReturn = @typeInfo(Value)
-                .@"fn"
-                .return_type.?;
-            const ValueErrorSet = @typeInfo(ValueReturn)
-                .error_union
-                .error_set;
-
-            const builder = Builder(Self, ValueErrorSet){
-                .describe_fn = struct {
-                    fn describe(err: ValueErrorSet) []const u8 {
-                        return switch (err) {
-                            Allocator.Error.OutOfMemory => "out of memory",
-                        };
+            const builder = Builder(Env, Allocator.Error){
+                .value_data = self,
+                .value_fn = struct {
+                    fn value(data: *Env, key: []const u8) Allocator.Error!?[]const u8 {
+                        return try data.value(key);
                     }
-                }.describe,
+                }.value,
                 .name_fn = struct {
                     fn name() []const u8 {
                         return "env";
                     }
                 }.name,
-                .value_data = self,
-                .value_fn = struct {
-                    fn value(data: *Env, key: []const u8) ValueErrorSet!?[]const u8 {
-                        const ptr: *Self = @ptrCast(@alignCast(data));
-                        return try ptr.*.value(key);
+                .describe_fn = struct {
+                    fn describe(err: Allocator.Error) []const u8 {
+                        return switch (err) {
+                            Allocator.Error.OutOfMemory => "out of memory",
+                        };
                     }
-                }.value,
+                }.describe,
             };
 
             return builder.source();
@@ -171,7 +141,30 @@ pub const Source = struct {
 
     // ∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧
     // ∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧ Built-in ∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧
-};
+
+    /// Builder allows you to fill in the multiple dependent fields
+    /// of a `Source` in a type-safe way,
+    /// and exposes `Builder.source` to return the source.
+    pub fn Builder(comptime Data: type, comptime Error: type) type {
+        return struct {
+            const Self = @This();
+
+            pub fn source(self: *const Self) Source {
+                return .{
+                    .value_data = self.value_data,
+                    .value_fn = @ptrCast(self.value_fn),
+                    .name_fn = self.name_fn,
+                    .describe_fn = @ptrCast(self.describe_fn),
+                };
+            }
+
+            value_data: *Data,
+            value_fn: *const fn (data: *Data, key: []const u8) Error!?[]const u8,
+            name_fn: *const fn () []const u8,
+            describe_fn: *const fn (err: Error) []const u8,
+        };
+    }
+}; // Source
 
 /// Setter interface.
 /// This type handles the conversion of raw bytes to typed values.
@@ -199,32 +192,18 @@ pub const Setter = struct {
         try self.set_fn(self.set_data, value);
     }
 
-    /// Builder is an additional step between some concrete implementation
-    /// of `Setter` and its type erased version.
-    /// It allows you to populate
-    pub fn Builder(comptime Data: type, comptime Error: type) type {
-        return struct {
-            const Self = @This();
-
-            set_data: *Data,
-            set_fn: *const fn (data: *Data, value: ?[]const u8) Error!void,
-            describe: *const fn (err: Error) []const u8,
-            require_value: bool,
-
-            /// Return a `Setter` from the `Builder`.
-            pub fn setter(self: *const Self) Setter {
-                return .{
-                    .set_data = @ptrCast(self.set_data),
-                    .set_fn = @ptrCast(self.set_fn),
-                    .describe = @ptrCast(self.describe),
-                    .require_value = self.require_value,
-                };
-            }
-        };
-    }
-
     // ∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨ Built-in ∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨
     // ∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨∨
+
+    /// Returns an options type that can be used to customize
+    /// the behavior of the built-in setters.
+    pub fn Opts(comptime Error: type) type {
+        return struct {
+            /// Define a new error handler for the setter.
+            /// This affords control over the built-in setter error messages.
+            describe: ?*const fn (Error) []const u8 = null,
+        };
+    }
 
     /// Additional built-ins which allocate memory.
     /// These require a bit more care, see the doc comments for details.
@@ -249,12 +228,13 @@ pub const Setter = struct {
         };
 
         /// TODO
-        pub fn @"[]const u8"(bytes: *Bytes) Builder(Bytes, Allocator.Error) {
-            return .{
+        pub fn @"[]const u8"(bytes: *Bytes, opts: Opts(Allocator.Error)) Setter {
+            const builder = Builder(Bytes, Allocator.Error){
                 .set_data = bytes,
                 .set_fn = struct {
                     fn set(data: *Bytes, value: ?[]const u8) Allocator.Error!void {
                         std.debug.assert(value != null);
+
                         const new_value = value.?;
                         const duped = try data.alloc.dupe(u8, new_value);
                         // Clean up old value.
@@ -263,7 +243,7 @@ pub const Setter = struct {
                         data.prev_alloc = duped;
                     }
                 }.set,
-                .describe = struct {
+                .describe = opts.describe orelse struct {
                     fn describe(err: Allocator.Error) []const u8 {
                         return switch (err) {
                             Allocator.Error.OutOfMemory => "out of memory",
@@ -272,6 +252,7 @@ pub const Setter = struct {
                 }.describe,
                 .require_value = true,
             };
+            return builder.setter();
         }
 
         test "allocating []const u8" {
@@ -290,7 +271,7 @@ pub const Setter = struct {
             // the setter was never called, so nothing was duped.
             // It won't try to free static memory.
 
-            const setter1 = Setter.Allocating.@"[]const u8"(&bytes).setter();
+            const setter1 = Setter.Allocating.@"[]const u8"(&bytes, .{});
             try setter1.set("solid");
             try std.testing.expectEqualStrings("solid", name);
             try std.testing.expectEqual(5, name.len);
@@ -302,11 +283,12 @@ pub const Setter = struct {
 
     /// Bytes setter.
     /// Assigns a value with no modification.
+    /// This setter is infallible.
     ///
     /// For an equivalent setter that dupes all values,
     /// see `Allocating.@"[]const u8"`.
-    pub fn @"[]const u8"(ptr: *[]const u8) Builder([]const u8, error{}) {
-        return .{
+    pub fn @"[]const u8"(ptr: *[]const u8) Setter {
+        const builder = Builder([]const u8, error{}){
             .set_data = @ptrCast(ptr),
             .set_fn = struct {
                 fn set(data: *[]const u8, value: ?[]const u8) error{}!void {
@@ -321,11 +303,12 @@ pub const Setter = struct {
             }.describe,
             .require_value = true,
         };
+        return builder.setter();
     }
 
     test @"[]const u8" {
         var a1: []const u8 = "";
-        const setter1 = Setter.@"[]const u8"(&a1).setter();
+        const setter1 = Setter.@"[]const u8"(&a1);
         try setter1.set("pear");
         try std.testing.expectEqualStrings("pear", a1);
         try std.testing.expectEqual(4, a1.len);
@@ -339,8 +322,8 @@ pub const Setter = struct {
     ///
     /// When this setter is called with a null or empty value,
     /// it will toggle the boolean.
-    pub fn @"bool"(ptr: *bool) Builder(bool, error{InvalidBoolean}) {
-        return .{
+    pub fn @"bool"(ptr: *bool, opts: Opts(error{InvalidBoolean})) Setter {
+        const builder = Builder(bool, error{InvalidBoolean}){
             .set_data = ptr,
             .set_fn = struct {
                 fn set(data: *bool, value: ?[]const u8) error{InvalidBoolean}!void {
@@ -360,46 +343,47 @@ pub const Setter = struct {
                     data.* = !data.*;
                 }
             }.set,
-            .describe = struct {
+            .describe = opts.describe orelse struct {
                 fn describe(err: error{InvalidBoolean}) []const u8 {
                     return switch (err) {
-                        error.InvalidBoolean => "explicit boolean flag value must be \"true\" or \"false\"",
+                        error.InvalidBoolean => "explicit boolean flag value must be true or false",
                     };
                 }
             }.describe,
             .require_value = false,
         };
+        return builder.setter();
     }
 
     test @"bool" {
         var storage: bool = false;
         try std.testing.expectEqual(false, storage);
 
-        const setter = Setter.bool(&storage);
+        const setter = Setter.bool(&storage, .{});
 
         // Toggle (no value)
-        try setter.set_fn(setter.set_data, null);
+        try setter.set(null);
         try std.testing.expectEqual(true, storage);
 
         // Toggle (empty value)
-        try setter.set_fn(setter.set_data, "");
+        try setter.set("");
         try std.testing.expectEqual(false, storage);
 
         // Set it to true twice, it should remain true.
         // This is to make sure calling the setter with a value
         // doesn't just toggle it.
-        try setter.set_fn(setter.set_data, "true");
+        try setter.set("true");
         try std.testing.expectEqual(true, storage);
-        try setter.set_fn(setter.set_data, "true");
+        try setter.set("true");
         try std.testing.expectEqual(true, storage);
 
-        try setter.set_fn(setter.set_data, "false");
+        try setter.set("false");
         try std.testing.expectEqual(false, storage);
     }
 
     /// Unsigned integer setter.
     /// Converts a value to the provided type T, which may be any unsigned integer.
-    pub fn unsigned(comptime T: type, ptr: *T) Builder(T, std.fmt.ParseIntError) {
+    pub fn unsigned(comptime T: type, ptr: *T, opts: Opts(std.fmt.ParseIntError)) Setter {
         comptime {
             const Info = @typeInfo(T);
             if (Info != .int or Info.int.signedness != .unsigned) {
@@ -414,16 +398,15 @@ pub const Setter = struct {
             break :blk std.fmt.comptimePrint("0..={d}", .{max_val});
         };
 
-        return .{
+        const builder = Builder(T, std.fmt.ParseIntError){
             .set_data = ptr,
             .set_fn = struct {
                 fn set(data: *T, value: ?[]const u8) std.fmt.ParseIntError!void {
                     std.debug.assert(value != null);
-                    const t: *T = @ptrCast(@alignCast(data));
-                    t.* = try std.fmt.parseUnsigned(T, value.?, 10);
+                    data.* = try std.fmt.parseUnsigned(T, value.?, 10);
                 }
             }.set,
-            .describe = struct {
+            .describe = opts.describe orelse struct {
                 fn describe(err: std.fmt.ParseIntError) []const u8 {
                     return switch (err) {
                         error.Overflow => "value must be in range of " ++ range,
@@ -433,11 +416,12 @@ pub const Setter = struct {
             }.describe,
             .require_value = true,
         };
+        return builder.setter();
     }
 
     test unsigned {
         var a: u8 = 1;
-        const setter1 = Setter.unsigned(u8, &a);
+        const setter1 = Setter.unsigned(u8, &a, .{});
         try setter1.set_fn(&a, "255");
         try std.testing.expectEqual(255, a);
         try std.testing.expectEqual(true, setter1.require_value);
@@ -445,7 +429,7 @@ pub const Setter = struct {
         try std.testing.expectError(error.InvalidCharacter, setter1.set_fn(&a, "a1"));
 
         var b: u16 = 0;
-        const setter2 = Setter.unsigned(u16, &b);
+        const setter2 = Setter.unsigned(u16, &b, .{});
         try setter2.set_fn(&b, "65535");
         try std.testing.expectEqual(65535, b);
         try std.testing.expectEqual(true, setter2.require_value);
@@ -453,7 +437,7 @@ pub const Setter = struct {
         try std.testing.expectError(error.InvalidCharacter, setter2.set_fn(&b, "a1"));
 
         var c: u9 = 0;
-        const setter3 = Setter.unsigned(u9, &c);
+        const setter3 = Setter.unsigned(u9, &c, .{});
         try setter3.set_fn(&c, "511");
         try std.testing.expectEqual(511, c);
         try std.testing.expectEqual(true, setter3.require_value);
@@ -463,7 +447,31 @@ pub const Setter = struct {
 
     // ∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧
     // ∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧ Built-in ∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧∧
-};
+
+    /// Builder allows you to fill in the multiple dependent fields
+    /// of a `Setter` in a type-safe way,
+    /// and exposes `Builder.setter` to return the setter.
+    pub fn Builder(comptime Data: type, comptime Error: type) type {
+        return struct {
+            const Self = @This();
+
+            /// Return a `Setter` from the `Builder`.
+            pub fn setter(self: *const Self) Setter {
+                return .{
+                    .set_data = @ptrCast(self.set_data),
+                    .set_fn = @ptrCast(self.set_fn),
+                    .describe = @ptrCast(self.describe),
+                    .require_value = self.require_value,
+                };
+            }
+
+            set_data: *Data,
+            set_fn: *const fn (data: *Data, value: ?[]const u8) Error!void,
+            describe: *const fn (err: Error) []const u8,
+            require_value: bool,
+        };
+    }
+}; // Env
 
 /// The primary sourceopt type.
 /// Store flags and sources inside an instance of `Parser`,
@@ -847,15 +855,15 @@ const HELP =
 // Basic parser usage with simple built-in flag setters.
 test "basic flags" {
     var help: bool = false;
-    const help_setter = Setter.bool(&help).setter();
+    const help_setter = Setter.bool(&help, .{});
     const help_flag = Flag{ .long = "help", .short = 'h', .setter = help_setter };
 
     var verbose: bool = false;
-    const verbose_setter = Setter.bool(&verbose).setter();
+    const verbose_setter = Setter.bool(&verbose, .{});
     const verbose_flag = Flag{ .long = "verbose", .short = 'v', .setter = verbose_setter };
 
     var port: u16 = 8080;
-    const port_setter = Setter.unsigned(u16, &port).setter();
+    const port_setter = Setter.unsigned(u16, &port, .{});
     const port_flag = Flag{ .long = "port", .setter = port_setter };
 
     try std.testing.expectEqual(false, help);
@@ -896,9 +904,9 @@ test "using sources" {
     try map.put("port", "9000");
     try map.put("verbose", "true");
 
-    const Builder = Source.Builder(Map, error{});
-
-    var map_builder = Builder{
+    // This setter wants to receive `*Map` as data,
+    // and happens to be infallible, so use an empty error set.
+    var builder = Source.Builder(Map, error{}){
         .value_data = &map,
         .value_fn = struct {
             fn value(data: *Map, key: []const u8) error{}!?[]const u8 {
@@ -907,8 +915,7 @@ test "using sources" {
         }.value,
         .describe_fn = struct {
             fn describe(_: error{}) []const u8 {
-                // Reading from a map is infallible,
-                // so you don't have to do anything here.
+                // No error to describe, so this will never be called.
                 unreachable;
             }
         }.describe,
@@ -920,12 +927,12 @@ test "using sources" {
     };
 
     var port: u16 = 8080;
-    const port_setter = Setter.unsigned(u16, &port);
-    const port_flag = Flag{ .long = "port", .setter = port_setter.setter() };
+    const port_setter = Setter.unsigned(u16, &port, .{});
+    const port_flag = Flag{ .long = "port", .setter = port_setter };
 
     var verbose: bool = false;
-    const verbose_setter = Setter.bool(&verbose);
-    const verbose_flag = Flag{ .long = "verbose", .setter = verbose_setter.setter() };
+    const verbose_setter = Setter.bool(&verbose, .{});
+    const verbose_flag = Flag{ .long = "verbose", .setter = verbose_setter };
 
     try std.testing.expectEqual(8080, port);
     try std.testing.expectEqual(false, verbose);
@@ -938,7 +945,7 @@ test "using sources" {
     };
     // Sources must be const, because sourceopt will not modify the source in any way.
     const root_sources = [_]Source{
-        map_builder.source(),
+        builder.source(),
     };
     const p = Parser{
         .flags = &root_flags,
