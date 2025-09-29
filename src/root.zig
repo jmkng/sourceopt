@@ -17,8 +17,8 @@ pub const Flag = struct {
     short: ?u8 = null,
     /// Triggered when a value is found for this flag.
     setter: Setter,
-    /// Indicates that the setter for this flag was called.
-    found: bool = false,
+    /// Indicates that the setter was called.
+    called: bool = false,
 };
 
 /// Source interface.
@@ -477,8 +477,8 @@ pub const Setter = struct {
 /// Store flags and sources inside an instance of `Parser`,
 /// and then use `Parser.parse`.
 pub const Parser = struct {
-    flags: []Flag,
-    sources: []const Source,
+    flags: []const *Flag,
+    sources: []const *Source,
 
     pub const ParseOpts = struct {
         /// Enables error diagnostics.
@@ -598,17 +598,17 @@ pub const Parser = struct {
                     }
                     return ParseError.InvalidValue;
                 };
-                flag.found = true;
+                flag.called = true;
             }
         }
 
         // Second stage.
         // Pass any unset flags through the sources.
         // This is the "source" in sourceopt!
-        iter_flag: for (flag_scope) |*flag| {
+        iter_flag: for (flag_scope) |flag| {
             // Sources only receive the long name.
             // Seems reasonable, but could also pass both and let the source decide.
-            if (flag.found) continue;
+            if (flag.called) continue;
 
             const long = flag.long;
             const setter = flag.setter;
@@ -637,7 +637,7 @@ pub const Parser = struct {
                         }
                         return ParseError.InvalidValue;
                     };
-                    flag.found = true;
+                    flag.called = true;
                     // Continue at the next unset flag.
                     continue :iter_flag;
                 }
@@ -648,32 +648,28 @@ pub const Parser = struct {
     /// Linear O(n) search through a set of flags,
     /// comparing name to the long and short name of each flag.
     /// The name must exactly match.
-    fn getFlagEquals(flags: []Flag, name: []const u8) ?*Flag {
-        for (flags) |*flag| {
+    fn getFlagEquals(flags: []const *Flag, name: []const u8) ?*Flag {
+        for (flags) |flag| {
             if (std.mem.eql(u8, name, flag.long))
                 return flag;
-
-            if (flag.short) |short_char| {
-                if (name.len == 1 and name[0] == short_char)
-                    return flag;
-            }
+            if (flag.short) |short| if (name.len == 1 and name[0] == short)
+                return flag;
         }
 
         return null;
     }
 
     test getFlagEquals {
-        const help_flag = Flag{
+        var help_flag = Flag{
             .long = "help",
             .short = 'h',
             .setter = undefined,
         };
-        var flags = [_]Flag{
-            help_flag,
+        var flags = [_]*Flag{
+            &help_flag,
         };
 
-        try std.testing.expectEqualDeep(&help_flag, getFlagEquals(&flags, "help"));
-        try std.testing.expectEqualDeep(&help_flag, getFlagEquals(&flags, "h"));
+        try std.testing.expectEqualDeep(help_flag, getFlagEquals(&flags, "help").?.*);
         try std.testing.expectEqual(null, getFlagEquals(&flags, "thing"));
     }
 }; // Parser
@@ -854,30 +850,55 @@ const HELP =
 
 // Basic parser usage with simple built-in flag setters.
 test "basic flags" {
+    const alloc = std.testing.allocator;
     var help: bool = false;
     const help_setter = Setter.bool(&help, .{});
-    const help_flag = Flag{ .long = "help", .short = 'h', .setter = help_setter };
+    var help_flag = Flag{ .long = "help", .short = 'h', .setter = help_setter };
 
     var verbose: bool = false;
     const verbose_setter = Setter.bool(&verbose, .{});
-    const verbose_flag = Flag{ .long = "verbose", .short = 'v', .setter = verbose_setter };
+    var verbose_flag = Flag{ .long = "verbose", .short = 'v', .setter = verbose_setter };
 
     var port: u16 = 8080;
     const port_setter = Setter.unsigned(u16, &port, .{});
-    const port_flag = Flag{ .long = "port", .setter = port_setter };
+    var port_flag = Flag{ .long = "port", .setter = port_setter };
+
+    var path: []const u8 = "default";
+    var path_bytes = Setter.Allocating.Bytes{
+        .alloc = alloc,
+        .ptr = &path,
+    };
+    const path_setter = Setter.Allocating.@"[]const u8"(&path_bytes, .{});
+    var path_flag = Flag{ .long = "path", .setter = path_setter };
+
+    // If the allocating []const u8 setter (path_setter above) is called,
+    // you probably want to deallocate that value at some point.
+    // You can check `Flag.called` to help with that.
+    // Alternatively, make your default value zero-length ("")
+    // and free will be a no-op.
+    // It is probably more safe to do it this way,
+    // just in case the default value is changed.
+    defer if (path_flag.called) alloc.free(path);
 
     try std.testing.expectEqual(false, help);
     try std.testing.expectEqual(false, verbose);
     try std.testing.expectEqual(8080, port);
 
     var fixed = Iterator.Fixed{
-        .items = &[_][]const u8{ "-hv", "--port", "9000" },
+        .items = &[_][]const u8{
+            "-hv",
+            "--port",
+            "9000",
+            "--path",
+            "/a/b.txt",
+        },
     };
 
-    var root_flags = [_]Flag{
-        help_flag,
-        verbose_flag,
-        port_flag,
+    const root_flags = [_]*Flag{
+        &help_flag,
+        &verbose_flag,
+        &port_flag,
+        &path_flag,
     };
     var p = Parser{
         .flags = &root_flags,
@@ -888,6 +909,7 @@ test "basic flags" {
     try std.testing.expectEqual(true, help);
     try std.testing.expectEqual(true, verbose);
     try std.testing.expectEqual(9000, port);
+    try std.testing.expectEqualStrings("/a/b.txt", path);
 }
 
 // Building and using a source.
@@ -925,27 +947,28 @@ test "using sources" {
             }
         }.name,
     };
+    var map_source = builder.source();
 
     var port: u16 = 8080;
     const port_setter = Setter.unsigned(u16, &port, .{});
-    const port_flag = Flag{ .long = "port", .setter = port_setter };
+    var port_flag = Flag{ .long = "port", .setter = port_setter };
 
     var verbose: bool = false;
     const verbose_setter = Setter.bool(&verbose, .{});
-    const verbose_flag = Flag{ .long = "verbose", .setter = verbose_setter };
+    var verbose_flag = Flag{ .long = "verbose", .setter = verbose_setter };
 
     try std.testing.expectEqual(8080, port);
     try std.testing.expectEqual(false, verbose);
 
     // Flags must be var, because sourceopt will set the "found" variable in each flag
     // to true if it calls the setter for that flag.
-    var root_flags = [_]Flag{
-        port_flag,
-        verbose_flag,
+    const root_flags = [_]*Flag{
+        &port_flag,
+        &verbose_flag,
     };
     // Sources must be const, because sourceopt will not modify the source in any way.
-    const root_sources = [_]Source{
-        builder.source(),
+    const root_sources = [_]*Source{
+        &map_source,
     };
     const p = Parser{
         .flags = &root_flags,
