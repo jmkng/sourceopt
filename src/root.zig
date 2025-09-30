@@ -206,7 +206,7 @@ pub const Setter = struct {
     }
 
     /// Additional built-ins which allocate memory.
-    /// These require a bit more care, see the doc comments for details.
+    /// Refer to the comments on each setter for details on memory management.
     pub const Allocating = struct {
         /// TODO
         pub const Bytes = struct {
@@ -477,34 +477,13 @@ pub const Setter = struct {
 /// Store flags and sources inside an instance of `Parser`,
 /// and then use `Parser.parse`.
 pub const Parser = struct {
+    iterator: Iterator,
     flags: []const *Flag,
     sources: []const *Source,
 
     pub const ParseOpts = struct {
         /// Enables error diagnostics.
         diagnostic: ?*Diagnostic = null,
-        /// When a positional buffer is provided,
-        /// positionals that are not registered subcommands will be appended to it.
-        ///
-        /// Without a buffer, all positionals are treated as unexpected arguments,
-        /// and cause `ParseError.UnexpectedArgument` to be returned.
-        positional_buf: ?PositionalBuf = null,
-    };
-
-    /// Positional argument buffer.
-    /// The allocator may be null, in which case, appending to buf will use `ArrayList.appendAssumeCapacity`.
-    /// Otherwise, the typical `ArrayList.append` is used with the allocator.
-    pub const PositionalBuf = struct {
-        alloc: ?Allocator,
-        buf: *std.ArrayList([]const u8),
-
-        pub fn append(self: *PositionalBuf, arg: []const u8) Allocator.Error!void {
-            var buf = self.buf;
-            if (self.alloc) |alloc| try buf.append(alloc, arg) else {
-                if (buf.items.len == buf.capacity) return Allocator.Error.OutOfMemory;
-                buf.appendAssumeCapacity(arg);
-            }
-        }
     };
 
     pub const Diagnostic = struct {
@@ -528,7 +507,7 @@ pub const Parser = struct {
         source_error_desc: []const u8 = "",
     };
 
-    pub const ParseError = error{
+    pub const Error = error{
         /// Found an unexpected argument.
         UnexpectedArgument,
         /// Found a flag not described in the flag scope.
@@ -543,33 +522,22 @@ pub const Parser = struct {
         SourceError,
     };
 
-    pub fn parse(self: *const Parser, args: Iterator, o: ParseOpts) ParseError!void {
+    /// Return the next positional argument.
+    /// Null indicates that parsing has finished.
+    pub fn next(self: *const Parser, o: ParseOpts) Error!?[]const u8 {
+        var iter = self.iterator;
         const flag_scope = self.flags;
 
         // First stage.
         // Handle arguments first.
-        var iter = args;
         while (iter.next()) |arg| {
-            if (!std.mem.startsWith(u8, arg, "-")) {
-                // Argument is a positional.
-                if (o.positional_buf) |buf| {
-                    var bb = buf;
-                    bb.append(arg) catch {
-                        if (o.diagnostic) |d| d.argument = arg;
-                        return ParseError.UnexpectedArgument;
-                    };
-                    continue;
-                }
-                if (o.diagnostic) |d| d.argument = arg;
-                return ParseError.UnexpectedArgument;
-            }
+            if (!std.mem.startsWith(u8, arg, "-")) return arg;
 
-            // Argument is a flag.
             var chunker = ArgChunker{ .arg = arg };
             while (chunker.next()) |chunk| {
                 var flag = getFlagEquals(flag_scope, chunk.name) orelse {
                     if (o.diagnostic) |d| d.argument = chunk.name;
-                    return ParseError.UnexpectedArgument;
+                    return Error.UnexpectedArgument;
                 };
 
                 const setter = flag.setter;
@@ -583,7 +551,7 @@ pub const Parser = struct {
                 // Additionally, if the value happens to look like a flag, something is probably wrong.
                 if (setter.require_value and (value == null or std.mem.startsWith(u8, value.?, "-"))) {
                     if (o.diagnostic) |d| d.argument = chunk.name;
-                    return ParseError.MissingValue;
+                    return Error.MissingValue;
                 }
 
                 // At this point, if the setter requires a value,
@@ -596,7 +564,7 @@ pub const Parser = struct {
                         d.flag_setter_error_desc = setter.describe(err);
                         d.flag_value = value orelse "";
                     }
-                    return ParseError.InvalidValue;
+                    return Error.InvalidValue;
                 };
                 flag.called = true;
             }
@@ -625,7 +593,7 @@ pub const Parser = struct {
                         d.source_error_desc = source.describe_fn(err);
                         d.source_name = source.name_fn();
                     }
-                    return ParseError.SourceError;
+                    return Error.SourceError;
                 };
 
                 if (value) |v| {
@@ -635,14 +603,15 @@ pub const Parser = struct {
                             d.flag_setter_error_desc = setter.describe(err);
                             d.flag_value = v;
                         }
-                        return ParseError.InvalidValue;
+                        return Error.InvalidValue;
                     };
                     flag.called = true;
-                    // Continue at the next unset flag.
                     continue :iter_flag;
                 }
             }
         }
+
+        return null;
     } // parse
 
     /// Linear O(n) search through a set of flags,
@@ -851,38 +820,36 @@ const HELP =
 // Basic parser usage with simple built-in flag setters.
 test "basic flags" {
     const alloc = std.testing.allocator;
+
     var help: bool = false;
+    var verbose: bool = false;
+    var port: u16 = 8080;
+    var path: []const u8 = "default";
+
     const help_setter = Setter.bool(&help, .{});
     var help_flag = Flag{ .long = "help", .short = 'h', .setter = help_setter };
 
-    var verbose: bool = false;
     const verbose_setter = Setter.bool(&verbose, .{});
     var verbose_flag = Flag{ .long = "verbose", .short = 'v', .setter = verbose_setter };
 
-    var port: u16 = 8080;
     const port_setter = Setter.unsigned(u16, &port, .{});
     var port_flag = Flag{ .long = "port", .setter = port_setter };
 
-    var path: []const u8 = "default";
     var path_bytes = Setter.Allocating.Bytes{
         .alloc = alloc,
         .ptr = &path,
     };
+    // This setter is special, it will dupe the value.
     const path_setter = Setter.Allocating.@"[]const u8"(&path_bytes, .{});
     var path_flag = Flag{ .long = "path", .setter = path_setter };
 
-    // If the allocating []const u8 setter (path_setter above) is called,
-    // you probably want to deallocate that value at some point.
-    // You can check `Flag.called` to help with that.
-    // Alternatively, make your default value zero-length ("")
-    // and free will be a no-op.
-    // It is probably more safe to do it this way,
-    // just in case the default value is changed.
+    // This example uses a setter that happens to allocate memory.
+    // You probably want to clean that up at some point.
+    //
+    // Depending on your choice of default value,
+    // you may want to only free if the setter was actually called.
+    // You can check the `Flag.checked` boolean for that.
     defer if (path_flag.called) alloc.free(path);
-
-    try std.testing.expectEqual(false, help);
-    try std.testing.expectEqual(false, verbose);
-    try std.testing.expectEqual(8080, port);
 
     var fixed = Iterator.Fixed{
         .items = &[_][]const u8{
@@ -894,18 +861,21 @@ test "basic flags" {
         },
     };
 
-    const root_flags = [_]*Flag{
-        &help_flag,
-        &verbose_flag,
-        &port_flag,
-        &path_flag,
-    };
     var p = Parser{
-        .flags = &root_flags,
+        .iterator = fixed.iterator(),
+        .flags = &[_]*Flag{
+            &help_flag,
+            &verbose_flag,
+            &port_flag,
+            &path_flag,
+        },
         .sources = &.{},
     };
 
-    try p.parse(fixed.iterator(), .{});
+    while (try p.next(.{})) |positional| {
+        _ = positional;
+        @panic("handle positionals here :)");
+    }
     try std.testing.expectEqual(true, help);
     try std.testing.expectEqual(true, verbose);
     try std.testing.expectEqual(9000, port);
@@ -917,8 +887,7 @@ test "basic flags" {
 // which is pretty contrived, but you can imagine pulling values from a config file,
 // or something more useful!
 test "using sources" {
-    // This first part is completely unrelated to sourceopt.
-    // Just make a regular old map and stuff some data in there.
+    // Just make a regular old map.
     const Map = std.StringHashMap([]const u8);
     var map = Map.init(std.testing.allocator);
     defer map.deinit();
@@ -949,38 +918,94 @@ test "using sources" {
     };
     var map_source = builder.source();
 
+    // The source is ready to use.
+    // Just make some flags and start parsing.
+
     var port: u16 = 8080;
+    var verbose: bool = false;
+
     const port_setter = Setter.unsigned(u16, &port, .{});
     var port_flag = Flag{ .long = "port", .setter = port_setter };
-
-    var verbose: bool = false;
     const verbose_setter = Setter.bool(&verbose, .{});
-    var verbose_flag = Flag{ .long = "verbose", .setter = verbose_setter };
+    var verbose_flag = Flag{ .long = "verbose", .short = 'v', .setter = verbose_setter };
 
-    try std.testing.expectEqual(8080, port);
-    try std.testing.expectEqual(false, verbose);
-
-    // Flags must be var, because sourceopt will set the "found" variable in each flag
-    // to true if it calls the setter for that flag.
     const root_flags = [_]*Flag{
         &port_flag,
         &verbose_flag,
     };
-    // Sources must be const, because sourceopt will not modify the source in any way.
     const root_sources = [_]*Source{
         &map_source,
     };
+
+    var fixed = Iterator.Fixed{ .items = &[_][]const u8{"-v"} };
     const p = Parser{
+        .iterator = fixed.iterator(),
         .flags = &root_flags,
         .sources = &root_sources,
     };
 
-    // No arguments are provided...
-    try p.parse(Iterator.Empty, .{});
+    while (try p.next(.{}) != null) {} // ^ No positionals in this iterator.
 
-    // But the values are still set, thanks to the map source!
+    // Found in the map.
     try std.testing.expectEqual(9000, port);
     try std.testing.expectEqual(true, verbose);
+}
+
+test "commands" {
+    var verbose: bool = false;
+    var path: []const u8 = "";
+
+    const verbose_setter = Setter.bool(&verbose, .{});
+    var verbose_flag = Flag{ .long = "verbose", .short = 'v', .setter = verbose_setter };
+    const path_setter = Setter.@"[]const u8"(&path);
+    var path_flag = Flag{ .long = "path", .setter = path_setter };
+
+    const global_flags = [_]*Flag{
+        // Lets say the "verbose" flag can appear anywhere,
+        // even after a command name.
+        &verbose_flag,
+    };
+    const save_flags = [1]*Flag{
+        // But the "path" flag should appear after the "save" command,
+        // or not at all.
+        &path_flag,
+    } ++
+        global_flags; // Merge globals.
+
+    const args = [_][]const u8{ "save", "--path", "/elsewhere", "-v" };
+    var fixed = Iterator.Fixed{ .items = &args };
+    const iterator = fixed.iterator();
+
+    var parser = Parser{
+        .iterator = iterator,
+        .flags = &global_flags,
+        .sources = &.{},
+    };
+
+    var positional_buf: [4][]const u8 = undefined;
+    var list = std.ArrayList([]const u8).initBuffer(&positional_buf);
+
+    // These are the "root" level commands this program expects.
+    // Use this as a fixture to switch on below.
+    const RootCommand = enum {
+        save,
+    };
+    var selected_command: ?RootCommand = null;
+
+    while (try parser.next(.{})) |pos| {
+        if (std.meta.stringToEnum(RootCommand, pos)) |comm| switch (comm) {
+            .save => {
+                parser.flags = &save_flags;
+                selected_command = RootCommand.save;
+            },
+        };
+        try list.append(std.testing.allocator, pos);
+    }
+    // Might want to "else |err|" here instead,
+    // and print something nice.
+
+    try std.testing.expectEqual(true, verbose);
+    try std.testing.expectEqualStrings("/elsewhere", path);
 }
 
 // TODO
