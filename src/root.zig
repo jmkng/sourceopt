@@ -808,15 +808,6 @@ test ArgChunker {
 
 // Examples
 
-const PROG_NAME = "example";
-
-const HELP =
-    \\\example
-    \\\
-    \\\FLAGS:
-    \\\    ...
-;
-
 // Basic parser usage with simple built-in flag setters.
 test "basic flags" {
     const alloc = std.testing.allocator;
@@ -951,6 +942,28 @@ test "using sources" {
     try std.testing.expectEqual(true, verbose);
 }
 
+// This example demonstrates how to handle commands.
+// Commands aren’t built into sourceopt directly,
+// but the parser’s streaming design makes supporting them straightforward.
+// These enums will serve as fixtures to switch on.
+
+// Command will represent all possible *final* command states.
+// The user can enter "save" or "save file".
+// If they do enter the nested "file" command after "save" then
+// they may also choose to supply a "path" flag.
+const Command = enum {
+    save,
+    file,
+};
+
+// Individual command states.
+// The root state expects a "save" command only.
+const RootCommand = enum { save };
+// If command "save" is found,
+// we'll start expecting a possible "file" command next,
+// but it isn't required.
+const SaveCommand = enum { file };
+
 test "commands" {
     var verbose: bool = false;
     var path: []const u8 = "";
@@ -965,14 +978,14 @@ test "commands" {
         // even after a command name.
         &verbose_flag,
     };
-    const save_flags = [1]*Flag{
+    const save_flags = [_]*Flag{
         // But the "path" flag should appear after the "save" command,
         // or not at all.
         &path_flag,
     } ++
         global_flags; // Merge globals.
 
-    const args = [_][]const u8{ "save", "--path", "/elsewhere", "-v" };
+    const args = [_][]const u8{ "save", "file", "--path", "/elsewhere", "-v" };
     var fixed = Iterator.Fixed{ .items = &args };
     const iterator = fixed.iterator();
 
@@ -982,21 +995,19 @@ test "commands" {
         .sources = &.{},
     };
 
+    // Lets pretend this program expects, at most, four positionals.
+    // You might want to heap allocate instead if you accept some unbounded amount.
     var positional_buf: [4][]const u8 = undefined;
     var list = std.ArrayList([]const u8).initBuffer(&positional_buf);
 
-    // These are the "root" level commands this program expects.
-    // Use this as a fixture to switch on below.
-    const RootCommand = enum {
-        save,
-    };
-    var selected_command: ?RootCommand = null;
+    // Use this variable to track the selected command.
+    var selected_command: ?Command = null;
 
     while (try parser.next(.{})) |pos| {
         if (std.meta.stringToEnum(RootCommand, pos)) |comm| switch (comm) {
             .save => {
                 parser.flags = &save_flags;
-                selected_command = RootCommand.save;
+                selected_command = try parseSaveCommand(parser, &list);
             },
         };
         try list.append(std.testing.allocator, pos);
@@ -1004,8 +1015,21 @@ test "commands" {
     // Might want to "else |err|" here instead,
     // and print something nice.
 
+    try std.testing.expectEqual(Command.file, selected_command);
     try std.testing.expectEqual(true, verbose);
     try std.testing.expectEqualStrings("/elsewhere", path);
+}
+
+// Continue parsing after a "save" command.
+fn parseSaveCommand(parser: Parser, list: *std.ArrayList([]const u8)) !Command {
+    var command = Command.save;
+    while (try parser.next(.{})) |pos| {
+        if (std.meta.stringToEnum(SaveCommand, pos)) |comm| switch (comm) {
+            .file => command = Command.file,
+        };
+        try list.append(std.testing.allocator, pos);
+    }
+    return command;
 }
 
 // TODO
