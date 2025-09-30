@@ -100,16 +100,23 @@ pub fn main() !void {
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    if (help) try printUsage(stdout) else if (selected_command) |comm| switch (comm) {
-        .greet => try printGreeting(stdout, greeting, names_list),
-    } else {
-        const t =
-            \\Welcome to the basic example!
-            \\Try "greet <name>" or "help" for usage.
-        ;
-        try stdout.print("{s}\n", .{t});
+    if (help) {
+        try printUsage(stdout);
+        return;
     }
 
+    if (selected_command) |comm| {
+        switch (comm) {
+            .greet => try printGreeting(stdout, greeting, names_list),
+        }
+        return;
+    }
+
+    const t =
+        \\Welcome to the basic example!
+        \\Try "greet <name>" or "help" for usage.
+    ;
+    try stdout.print("{s}\n", .{t});
     try stdout.flush();
 }
 
